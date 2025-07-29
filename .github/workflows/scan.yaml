@@ -1,0 +1,146 @@
+name: Gitleaks Secret Scanner
+
+on:
+  push:
+    branches: [ main ]
+  schedule:
+    - cron: '0 2 * * *'  # Nightly at 2 AM
+  workflow_dispatch:
+    inputs:
+      scan_mode:
+        description: 'Scan mode'
+        required: false
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - diff-only
+
+env:
+  GITLEAKS_VERSION: 8.18.0
+
+jobs:
+  secret-scan:
+    name: Scan for Secrets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for complete scan
+      
+      - name: Set Scan Mode
+        id: scan_mode
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.event.inputs.scan_mode }}" != "full" ]; then
+            echo "mode=diff-only" >> $GITHUB_OUTPUT
+          else
+            echo "mode=${{ github.event.inputs.scan_mode || 'full' }}" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Install Gitleaks
+        run: |
+          wget -q https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz
+          tar -xzf gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz
+          sudo mv gitleaks /usr/local/bin/
+          gitleaks version
+      
+      - name: Run Gitleaks (Full History)
+        if: steps.scan_mode.outputs.mode == 'full'
+        run: |
+          echo "🔍 Running full historical scan..."
+          gitleaks detect \
+            --source=. \
+            --report-format=json \
+            --report-path=gitleaks-report.json \
+            --no-banner \
+            --redact=false \
+            --exit-code=0  # Don't fail on findings, we'll handle this later
+      
+      - name: Run Gitleaks (Diff Only)
+        if: steps.scan_mode.outputs.mode == 'diff-only'
+        run: |
+          echo "🔍 Running diff-only scan..."
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+            git diff ${BASE_SHA}...${HEAD_SHA} > diff.patch
+            gitleaks protect \
+              --source=. \
+              --report-format=json \
+              --report-path=gitleaks-report.json \
+              --no-banner \
+              --staged \
+              --exit-code=0
+          else
+            gitleaks protect \
+              --source=. \
+              --report-format=json \
+              --report-path=gitleaks-report.json \
+              --no-banner \
+              --exit-code=0
+          fi
+      
+      - name: Setup Python
+        if: always()
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Extract Context and Generate Summary
+        if: always()
+        run: |
+          python .github/scripts/parse-gitleaks-context.py \
+            --report gitleaks-report.json \
+            --mode ${{ steps.scan_mode.outputs.mode }}
+      
+      - name: Upload Gitleaks Report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: gitleaks-report
+          path: |
+            gitleaks-report.json
+            gitleaks-summary.md
+          retention-days: 30
+      
+      - name: Comment on PR
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (fs.existsSync('gitleaks-summary.md')) {
+              const summary = fs.readFileSync('gitleaks-summary.md', 'utf8');
+              if (summary.includes('🚨')) {
+                github.rest.issues.createComment({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body: summary
+                });
+              }
+            }
+      
+      - name: Check for Critical Secrets
+        if: always()
+        run: |
+          if [ -f gitleaks-report.json ]; then
+            CRITICAL_COUNT=$(python -c "
+          import json
+          with open('gitleaks-report.json', 'r') as f:
+              data = json.load(f)
+              critical_rules = ['aws-access-token', 'private-key', 'github-pat']
+              critical = [r for r in data if any(cr in r.get('RuleID', '').lower() for cr in critical_rules)]
+              print(len(critical))
+                      ")
+                      
+                      if [ "$CRITICAL_COUNT" -gt 0 ]; then
+                        echo "❌ Found $CRITICAL_COUNT critical secrets!"
+                        exit 1
+                      fi
+                    fi
