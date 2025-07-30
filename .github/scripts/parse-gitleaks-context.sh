@@ -2,7 +2,7 @@
 # Gitleaks Context Parser - Bash Version
 # Extracts context around detected secrets and generates GitHub Actions summary
 
-set -euo pipefail
+set -uo pipefail
 
 # Default values
 REPORT_PATH=""
@@ -267,7 +267,17 @@ main() {
     # Write summary to files
     echo -e "$summary" > "$SUMMARY_PATH"
     echo -e "$summary" > "gitleaks-summary.md"
+    
+    # Print summary to console for visibility (like Python version did)
+    echo ""
+    echo "=========================================="
+    echo -e "$summary"
+    echo "=========================================="
 }
 
 # Run main function
 main
+
+# Always exit with 0 to allow workflow to continue
+# The workflow's "Check for Critical Secrets" step will handle the actual failure
+exit 0
