@@ -41,9 +41,13 @@ jobs:
           else
             echo "mode=${{ github.event.inputs.scan_mode || 'full' }}" >> $GITHUB_OUTPUT
           fi
-      
-      - name: Install Gitleaks
+    
+      - name: Install Dependencies
         run: |
+          # Install jq for JSON parsing
+          sudo apt-get update && sudo apt-get install -y jq
+          
+          # Install Gitleaks
           wget -q https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz
           tar -xzf gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz
           sudo mv gitleaks /usr/local/bin/
@@ -85,16 +89,10 @@ jobs:
               --exit-code=0
           fi
       
-      - name: Setup Python
-        if: always()
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-      
       - name: Extract Context and Generate Summary
         if: always()
         run: |
-          python .github/scripts/parse-gitleaks-context.py \
+          .github/scripts/parse-gitleaks-context.sh \
             --report gitleaks-report.json \
             --mode ${{ steps.scan_mode.outputs.mode }}
       
@@ -130,17 +128,10 @@ jobs:
         if: always()
         run: |
           if [ -f gitleaks-report.json ]; then
-            CRITICAL_COUNT=$(python -c "
-          import json
-          with open('gitleaks-report.json', 'r') as f:
-              data = json.load(f)
-              critical_rules = ['aws-access-token', 'private-key', 'github-pat']
-              critical = [r for r in data if any(cr in r.get('RuleID', '').lower() for cr in critical_rules)]
-              print(len(critical))
-                      ")
-                      
-                      if [ "$CRITICAL_COUNT" -gt 0 ]; then
-                        echo "❌ Found $CRITICAL_COUNT critical secrets!"
-                        exit 1
-                      fi
-                    fi
+            CRITICAL_COUNT=$(jq '[.[] | select(.RuleID | ascii_downcase | test("aws[-_]access|private[-_]key|github[-_]pat"))] | length' gitleaks-report.json)
+            
+            if [ "$CRITICAL_COUNT" -gt 0 ]; then
+              echo "❌ Found $CRITICAL_COUNT critical secrets!"
+              exit 1
+            fi
+          fi
