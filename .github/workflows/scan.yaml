@@ -3,8 +3,8 @@ name: Gitleaks Secret Scanner
 on:
   push:
     branches: [ main ]
-  schedule:
-    - cron: '0 2 * * *'  # Nightly at 2 AM
+  # schedule:
+  #   - cron: '0 2 * * *'  # Nightly at 2 AM
   workflow_dispatch:
     inputs:
       scan_mode:
